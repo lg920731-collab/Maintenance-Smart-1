@@ -488,6 +488,220 @@
 
   <script>
     const STORAGE_KEY = 'ms-maintenance-logs';
+<script>
+    const STORAGE_KEY = 'ms-maintenance-logs';
+
+    // ===== 後端 API 設定（⚠ 這裡記得改成你的 Server 位址）=====
+    const API_BASE_URL = 'https://your-server.example.com'; // 例如 https://ms-api.company.com
+    const LOGS_ENDPOINT = API_BASE_URL + '/logs';
+
+    // 把紀錄送到後端（Node.js / PHP / 其他語言都可以，只要這個 API 存到 MySQL）
+    async function saveRecordToServer(payload) {
+      const res = await fetch(LOGS_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (!res.ok) {
+        // 後端回 500 / 400 都算失敗
+        const text = await res.text().catch(() => '');
+        throw new Error('Server error: ' + res.status + ' ' + text);
+      }
+
+      // 後端可以回 { ok:true, id:123 } 之類
+      return res.json().catch(() => ({}));
+    }
+
+    function loadRecords(){
+      try{
+        return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+      }catch(e){
+        console.error(e);
+        return [];
+      }
+    }
+
+    function saveRecords(arr){
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(arr));
+    }
+
+    function updateStatus(msg){
+      const el = document.getElementById('status');
+      if (!el) return;
+      const logs = loadRecords();
+      el.innerHTML = msg + '<br><strong>Total records: ' + logs.length + '</strong>';
+    }
+
+    function setToday(){
+      const input = document.getElementById('dateInput');
+      if (!input) return;
+      if (!input.value){
+        const today = new Date().toISOString().slice(0,10);
+        input.value = today;
+      }
+    }
+
+    // 讀取網址 ?asset=PC-xxx
+    function getAssetIdFromQuery(){
+      const params = new URLSearchParams(window.location.search);
+      const asset = params.get('asset');
+      if (!asset) return '';
+      return normalizeAssetId(asset);
+    }
+
+    // Asset ID 標準化：PC-001 ~ PC-999
+    function normalizeAssetId(input) {
+      if (!input) return "";
+
+      let v = String(input).trim().toUpperCase();
+
+      // 已經是 PC-001 格式
+      if (/^PC-\d{3}$/.test(v)) return v;
+
+      // 把 PC 前綴拿掉，只留數字
+      v = v.replace(/^PC/i, "").replace(/[^0-9]/g, "");
+
+      if (!v) return "";
+
+      const num = parseInt(v, 10);
+      if (!Number.isFinite(num) || num < 1 || num > 999) {
+        return "";
+      }
+
+      return "PC-" + String(num).padStart(3, "0");
+    }
+
+    // 🔹 改成 async，會同時：
+    //    1. 寫入 MySQL（透過 API）
+    //    2. 寫入 localStorage 當備份
+    async function saveRecord(){
+      const date      = document.getElementById('dateInput').value;
+      const line      = document.getElementById('lineInput').value;
+      const section   = document.getElementById('sectionInput').value;
+
+      const equipInputEl = document.getElementById('equipInput');
+      const rawEquip     = equipInputEl.value;
+      const assetId      = normalizeAssetId(rawEquip);   // 轉成 PC-xxx
+
+      const category  = document.getElementById('catInput').value;
+      const downtime  = Number(document.getElementById('downInput').value || 0);
+      const rootcause = document.getElementById('rootInput').value.trim();
+      const action    = document.getElementById('actionInput').value.trim();
+      const loc_from  = document.getElementById('locFromInput').value.trim();
+      const loc_to    = document.getElementById('locToInput').value.trim();
+
+      // 沒填日期或 Asset ID 格式不正確
+      if (!date || !assetId){
+        updateStatus(
+          'Please fill <strong>Date</strong> and a valid <strong>Asset ID</strong> (PC-001 ~ PC-999).'
+        );
+        return;
+      }
+
+      // 把格式化好的字串回寫到輸入框，讓畫面也看到 PC-0xx
+      equipInputEl.value = assetId;
+
+      // 給 MySQL API 用的 payload（欄位名稱跟你後端 / MySQL 對應）
+      const payloadForServer = {
+        asset_id: assetId,
+        line,
+        section,
+        date,
+        category,
+        downtime_min: downtime,
+        location_from: loc_from,
+        location_to: loc_to,
+        root_cause: rootcause,
+        action_taken: action
+      };
+
+      // 給 localStorage 用的版本（多保留 timestamp / id）
+      const recordForLocal = {
+        Date: date,
+        line,
+        section,
+        asset_id: assetId,
+        category,
+        downtime_min: downtime,
+        root_cause: rootcause,
+        action_taken: action,
+        location_from: loc_from,
+        location_to: loc_to,
+        timestamp: new Date().toISOString(),
+        id: (crypto && crypto.randomUUID) ? crypto.randomUUID() : ('rec_' + Date.now())
+      };
+
+      let serverOk = false;
+      try{
+        // 寫入 MySQL（透過 API）
+        await saveRecordToServer(payloadForServer);
+        serverOk = true;
+      }catch(e){
+        console.error('Save to server failed:', e);
+      }
+
+      // 不管 server 成功與否，都先寫 localStorage 當備份
+      const logs = loadRecords();
+      logs.push(recordForLocal);
+      saveRecords(logs);
+
+      // 清掉其他欄位（Asset ID 留著，方便連續記錄同一台）
+      document.getElementById('downInput').value = '';
+      document.getElementById('rootInput').value = '';
+      document.getElementById('actionInput').value = '';
+      document.getElementById('locFromInput').value = '';
+      document.getElementById('locToInput').value = '';
+
+      if (serverOk){
+        updateStatus('✅ Record saved to <strong>server (MySQL)</strong> and this browser.');
+      }else{
+        updateStatus('⚠ Server unavailable – record saved in <strong>this browser only</strong>.');
+      }
+    }
+
+    function downloadJson(){
+      const logs = loadRecords();
+      const blob = new Blob([JSON.stringify(logs, null, 2)], {type:'application/json'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'maintenance_logs.json';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      updateStatus('JSON file downloaded. You can use it in Python / Excel.');
+    }
+
+    (function init(){
+      setToday();
+
+      // 從網址帶進來的 ?asset=PC-xxx 自動填入
+      const fromUrl = getAssetIdFromQuery();
+      if (fromUrl) {
+        const equipInputEl = document.getElementById('equipInput');
+        if (equipInputEl) equipInputEl.value = fromUrl;
+      }
+
+      // Asset ID 欄位 blur 時自動整理成標準格式（如果合法）
+      const equipInputEl = document.getElementById('equipInput');
+      if (equipInputEl) {
+        equipInputEl.addEventListener('blur', ()=>{
+          const formatted = normalizeAssetId(equipInputEl.value);
+          if (formatted) {
+            equipInputEl.value = formatted;
+          } else {
+            equipInputEl.value = equipInputEl.value.trim().toUpperCase();
+          }
+        });
+      }
+
+      updateStatus('Ready to record maintenance tasks.');
+    })();
+  </script>
 
     function loadRecords(){
       try{
